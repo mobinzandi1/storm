@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+fuzzywuzzy
+python-Levenshtein
+openpyxl
+xlsxwriter
+Pillow
+uuid
