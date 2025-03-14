@@ -53,8 +53,14 @@ st.set_page_config(
 )
 
 # بارگذاری لوگوی WALLEX
-logo = Image.open("C:/Users/walle/wallex_logo.png")  # مسیر کامل فایل لوگو (بر اساس مسیر تو)
-st.image(logo, width=200)
+try:
+    # بارگذاری لوگو با مسیر نسبی
+    logo_path = "assets/wallex_logo.png"
+    logo = Image.open(logo_path)
+    st.image(logo, width=200)
+except Exception as e:
+    st.warning(f"خطا در بارگذاری لوگو: {str(e)}")
+    # ادامه اجرای برنامه بدون لوگو
 
 # CSS پیشرفته برای رابط کاربری فوق‌العاده زیبا و مدرن با تم WALLEX
 st.markdown("""
