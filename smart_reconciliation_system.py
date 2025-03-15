@@ -2,12 +2,8 @@ import pandas as pd
 import numpy as np
 import re
 import os
-import json
-from fuzzywuzzy import fuzz
-import xlsxwriter
 import tempfile
 import streamlit as st
-from multiprocessing import Pool
 import logging
 
 # تنظیم لاگ برای دیباگ
@@ -22,7 +18,7 @@ class SmartReconciliationSystem:
             r'wallex-[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+',
         ]
         self.platform_tracking_columns = ['gateway_tracking_code', 'gateway_identifier', 'meta_data_1']
-        self.chunk_size = 2000  # کاهش اندازه تکه‌ها برای پردازش
+        self.chunk_size = 500  # اندازه تکه‌ها رو کم کردیم
 
     def detect_file_type(self, file_path):
         _, ext = os.path.splitext(file_path)
@@ -51,8 +47,8 @@ class SmartReconciliationSystem:
         columns_to_check = [col for col in columns_to_check if col in df.columns]
         logging.info(f"Extracting codes from {len(df)} rows, columns: {columns_to_check}")
 
-        def process_chunk(chunk):
-            codes = []
+        for start in range(0, len(df), self.chunk_size):
+            chunk = df.iloc[start:start + self.chunk_size]
             for col in columns_to_check:
                 chunk[col] = chunk[col].astype(str).fillna('')
                 for pattern in self.tracking_patterns:
@@ -60,17 +56,12 @@ class SmartReconciliationSystem:
                     for match in matches:
                         rows = chunk[chunk[col].str.contains(match, regex=False, na=False)].index
                         for idx in rows:
-                            codes.append({
+                            tracking_codes.append({
                                 'code': match,
                                 'column': col,
                                 'row_index': idx,
                                 'original_text': chunk.loc[idx, col]
                             })
-            return codes
-
-        with Pool() as pool:
-            chunks = [df[i:i + self.chunk_size] for i in range(0, len(df), self.chunk_size)]
-            tracking_codes = sum(pool.map(process_chunk, chunks), [])
 
         result = pd.DataFrame(tracking_codes).drop_duplicates(subset=['code'])
         logging.info(f"Extracted {len(result)} unique codes")
@@ -100,32 +91,10 @@ class SmartReconciliationSystem:
 
         return matches, non_matches
 
-    def find_similar_codes(self, codes1, codes2, threshold=85):
-        logging.warning("Fuzzy matching is disabled for performance (using exact matches only)")
-        return self.find_exact_matches(codes1, codes2)
-
-    def reconcile_platform_with_provider(self, platform_path, provider_path):
-        platform_df = self.read_file(platform_path, columns=self.platform_tracking_columns + ['gateway'])
-        provider_df = self.read_file(provider_path)
-        
-        platform_codes = self.extract_codes_from_platform(platform_df)
-        provider_codes = self.extract_codes_from_provider(provider_df)
-        
-        matches, non_matches = self.find_exact_matches(platform_codes, provider_codes)
-        
-        return {
-            'platform': platform_df,
-            'provider': provider_df,
-            'platform_codes': platform_codes,
-            'provider_codes': provider_codes,
-            'matches': matches,
-            'non_matches': non_matches
-        }
-
-    def gateway_specific_reconciliation(self, platform_path, provider_path, gateway_name):
-        platform_df = self.read_file(platform_path, columns=self.platform_tracking_columns + ['gateway'])
+    def gateway_specific_reconciliation(self, platform_path, provider_path, gateway_name, nrows=None):
+        platform_df = self.read_file(platform_path, columns=self.platform_tracking_columns + ['gateway'], nrows=nrows)
         logging.info(f"Platform data loaded with shape: {platform_df.shape}")
-        provider_df = self.read_file(provider_path)
+        provider_df = self.read_file(provider_path, nrows=nrows)
         logging.info(f"Provider data loaded with shape: {provider_df.shape}")
 
         filtered_platform = platform_df[platform_df['gateway'].astype(str).str.lower() == gateway_name.lower()]
@@ -176,59 +145,107 @@ class SmartReconciliationSystem:
         return True
 
 if __name__ == "__main__":
-    st.title("Smart Reconciliation System")
+    st.title("سیستم مغایرت‌گیری هوشمند")
 
-    platform_file = st.file_uploader("Upload Platform File", type=['csv', 'xlsx', 'json'])
-    provider_file = st.file_uploader("Upload Provider File", type=['csv', 'xlsx', 'json'])
-    gateway_name = st.text_input("Enter Gateway Name (e.g., toman)", value="toman")
-    nrows_limit = st.number_input("Limit number of rows per file (0 for no limit)", min_value=0, value=1000)
+    # استفاده از Session State برای ذخیره مراحل
+    if 'step' not in st.session_state:
+        st.session_state.step = 0
+    if 'results' not in st.session_state:
+        st.session_state.results = None
+    if 'platform_path' not in st.session_state:
+        st.session_state.platform_path = None
+    if 'provider_path' not in st.session_state:
+        st.session_state.provider_path = None
 
-    if st.button("Start Reconciliation"):
+    platform_file = st.file_uploader("فایل پلتفرم را انتخاب کنید", type=['csv', 'xlsx', 'json'])
+    provider_file = st.file_uploader("فایل ارائه‌دهنده را انتخاب کنید", type=['csv', 'xlsx', 'json'])
+    gateway_name = st.text_input("نام Gateway را وارد کنید (مثلاً toman)", value="toman")
+    nrows_limit = st.number_input("محدودیت تعداد ردیف‌ها برای هر فایل (0 برای بدون محدودیت)", min_value=0, value=1000)
+
+    if st.button("شروع مغایرت‌گیری"):
         if platform_file and provider_file:
+            # ذخیره فایل‌ها
             with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_platform, \
                  tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_provider:
                 tmp_platform.write(platform_file.read())
                 tmp_provider.write(provider_file.read())
-                platform_path, provider_path = tmp_platform.name, tmp_provider.name
+                st.session_state.platform_path = tmp_platform.name
+                st.session_state.provider_path = tmp_provider.name
 
-            st.write("Starting reconciliation process...")
-            system = SmartReconciliationSystem()
-            try:
-                st.write(f"Reading platform file with {platform_file.size/1024:.2f} KB...")
-                platform_df = system.read_file(platform_path, columns=['gateway'] + system.platform_tracking_columns, 
-                                            nrows=None if nrows_limit == 0 else nrows_limit)
-                st.write(f"Platform data shape: {platform_df.shape}")
-                st.write(f"Reading provider file...")
-                provider_df = system.read_file(provider_path, nrows=None if nrows_limit == 0 else nrows_limit)
-                st.write(f"Provider data shape: {provider_df.shape}")
+            st.session_state.step = 1
+            st.write("فایل‌ها ذخیره شدند، در حال پردازش...")
 
-                st.write("Extracting codes from platform...")
-                platform_codes = system.extract_codes_from_platform(platform_df)
-                st.write(f"Platform codes count: {len(platform_codes)}")
-                st.write("Extracting codes from provider...")
-                provider_codes = system.extract_codes_from_provider(provider_df)
-                st.write(f"Provider codes count: {len(provider_codes)}")
+    # مراحل پردازش با استفاده از Session State
+    system = SmartReconciliationSystem()
+    if st.session_state.step == 1:
+        try:
+            st.write(f"در حال خواندن فایل پلتفرم با حجم {platform_file.size/1024:.2f} KB...")
+            platform_df = system.read_file(st.session_state.platform_path, 
+                                        columns=['gateway'] + system.platform_tracking_columns, 
+                                        nrows=None if nrows_limit == 0 else nrows_limit)
+            st.write(f"شکل داده‌های پلتفرم: {platform_df.shape}")
+            st.write("استخراج کدها از پلتفرم...")
+            platform_codes = system.extract_codes_from_platform(platform_df)
+            st.write(f"تعداد کدهای پلتفرم: {len(platform_codes)}")
 
-                st.write("Matching codes...")
-                results = system.gateway_specific_reconciliation(platform_path, provider_path, gateway_name)
-                
-                if results:
-                    st.write("Reconciliation completed, generating report...")
-                    output_path = f"reconciliation_report_{gateway_name}.xlsx"
-                    if system.generate_report(results, output_path):
-                        st.success(f"Report generated: {output_path}")
-                        with open(output_path, "rb") as f:
-                            st.download_button(label="Download Report", data=f, file_name=output_path)
-                        for key in ['filtered_platform', 'provider', 'matches', 'non_matches', 'unmatched_provider']:
-                            if key in results and not results[key].empty:
-                                st.subheader(f"Dataframe {key}")
-                                st.write(results[key].head())
-                else:
-                    st.error("No results from reconciliation.")
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-            finally:
-                os.unlink(platform_path)
-                os.unlink(provider_path)
-        else:
-            st.warning("Please upload both files.")
+            st.session_state.platform_codes = platform_codes
+            st.session_state.platform_df = platform_df
+            st.session_state.step = 2
+            st.write("استخراج کدها از پلتفرم انجام شد، در حال ادامه...")
+        except Exception as e:
+            st.error(f"خطا در مرحله 1: {str(e)}")
+            st.session_state.step = 0
+
+    if st.session_state.step == 2:
+        try:
+            st.write("در حال خواندن فایل ارائه‌دهنده...")
+            provider_df = system.read_file(st.session_state.provider_path, 
+                                        nrows=None if nrows_limit == 0 else nrows_limit)
+            st.write(f"شکل داده‌های ارائه‌دهنده: {provider_df.shape}")
+            st.write("استخراج کدها از ارائه‌دهنده...")
+            provider_codes = system.extract_codes_from_provider(provider_df)
+            st.write(f"تعداد کدهای ارائه‌دهنده: {len(provider_codes)}")
+
+            st.session_state.provider_codes = provider_codes
+            st.session_state.provider_df = provider_df
+            st.session_state.step = 3
+            st.write("استخراج کدها از ارائه‌دهنده انجام شد، در حال ادامه...")
+        except Exception as e:
+            st.error(f"خطا در مرحله 2: {str(e)}")
+            st.session_state.step = 0
+
+    if st.session_state.step == 3:
+        try:
+            st.write("در حال تطبیق کدها...")
+            results = system.gateway_specific_reconciliation(st.session_state.platform_path, 
+                                                          st.session_state.provider_path, 
+                                                          gateway_name, 
+                                                          nrows=None if nrows_limit == 0 else nrows_limit)
+            
+            if results:
+                st.write("مغایرت‌گیری انجام شد، در حال تولید گزارش...")
+                output_path = f"reconciliation_report_{gateway_name}.xlsx"
+                if system.generate_report(results, output_path):
+                    st.success(f"گزارش تولید شد: {output_path}")
+                    with open(output_path, "rb") as f:
+                        st.download_button(label="دانلود گزارش", data=f, file_name=output_path)
+                    for key in ['filtered_platform', 'provider', 'matches', 'non_matches', 'unmatched_provider']:
+                        if key in results and not results[key].empty:
+                            st.subheader(f"دیتافریم {key}")
+                            st.write(results[key].head())
+                st.session_state.results = results
+            else:
+                st.error("هیچ نتیجه‌ای از مغایرت‌گیری به دست نیامد.")
+            
+            st.session_state.step = 0
+        except Exception as e:
+            st.error(f"خطا در مرحله 3: {str(e)}")
+            st.session_state.step = 0
+        finally:
+            if st.session_state.platform_path:
+                os.unlink(st.session_state.platform_path)
+            if st.session_state.provider_path:
+                os.unlink(st.session_state.provider_path)
+
+    if st.session_state.step == 0 and not platform_file and not provider_file:
+        st.session_state.results = None
